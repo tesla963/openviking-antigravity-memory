@@ -31,6 +31,16 @@ async function allScripts() {
 }
 
 describe("portabilidad: sin rutas del autor", () => {
+  it("hooks.json usa el intérprete absoluto, no 'node' a secas", async () => {
+    const text = await read("hooks.json");
+    assert.ok(
+      text.includes("{{NODE_BIN}}"),
+      "Antigravity ejecuta con /bin/sh -c, que no hereda el PATH: 'node' muere con exit 127",
+    );
+    const install = await read("scripts/install.mjs");
+    assert.ok(install.includes("NODE_BIN: process.execPath"));
+  });
+
   it("hooks.json y mcp_config.json usan placeholders, no /home/", async () => {
     for (const f of ["hooks.json", "mcp_config.json"]) {
       const text = await read(f);

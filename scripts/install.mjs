@@ -120,6 +120,10 @@ async function main() {
     RUNTIME_DIR: runtimeRoot,
     OVCLI_CONF: ovcliConf,
     URL: opts.url,
+    // Ruta absoluta al intérprete: Antigravity ejecuta los hooks con
+    // /bin/sh -c, y ese shell no hereda el PATH del usuario. Con "node" a
+    // secas el hook muere con `sh: node: command not found` (exit 127).
+    NODE_BIN: process.execPath,
   };
 
   const itemsToCopy = [

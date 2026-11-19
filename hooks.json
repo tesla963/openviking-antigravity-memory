@@ -3,14 +3,14 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "node {{PLUGIN_DIR}}/scripts/antigravity-hook.mjs pre-invocation",
+        "command": "\"{{NODE_BIN}}\" \"{{PLUGIN_DIR}}/scripts/antigravity-hook.mjs\" pre-invocation",
         "timeout": 20
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "command": "node {{PLUGIN_DIR}}/scripts/antigravity-hook.mjs stop",
+        "command": "\"{{NODE_BIN}}\" \"{{PLUGIN_DIR}}/scripts/antigravity-hook.mjs\" stop",
         "timeout": 20
       }
     ]
