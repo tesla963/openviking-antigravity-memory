@@ -3,11 +3,11 @@
     "openviking": {
       "command": "node",
       "args": [
-        "/home/vladimir/.gemini/config/plugins/openviking-memory/servers/mcp-proxy.mjs"
+        "{{PLUGIN_DIR}}/servers/mcp-proxy.mjs"
       ],
       "env": {
-        "OPENVIKING_CLI_CONFIG_FILE": "/home/vladimir/.openviking/antigravity/ovcli.conf",
-        "OPENVIKING_INTEGRATION_VERSION": "antigravity-0.1.0"
+        "OPENVIKING_CLI_CONFIG_FILE": "{{OVCLI_CONF}}",
+        "OPENVIKING_INTEGRATION_VERSION": "antigravity-0.2.0-macos"
       },
       "disabled": false
     }

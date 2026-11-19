@@ -1,24 +1,19 @@
-// GENERATED FROM examples/memory-plugin-shared/lib. DO NOT EDIT.
-const TEXT_BLOCK_TYPES = new Set(["text", "input_text", "output_text"]);
-const TOOL_CALL_TYPES = new Set([
-  "tool_call",
-  "toolcall",
-  "tool_use",
-  "tooluse",
-  "function_call",
-  "functioncall",
-]);
-const TOOL_RESULT_TYPES = new Set([
-  "tool_result",
-  "toolresult",
-  "tool_output",
-  "tooloutput",
-  "function_call_output",
-  "functioncalloutput",
-]);
+// capture-utils.mjs
+// Derivado de V0v1kkk/openviking-antigravity-memory (MIT, Vladimir Rogozhin).
+//
+// PODA: se eliminan ~340 líneas inalcanzables en este plugin (AST y formateo de
+// bloques de herramientas: normalizeType/isToolCallBlock/buildToolPart/
+// extractTextFromContent/extractTextFromPayload/extractPartsFromPayload/
+// extractCaptureTurns/normalizeCaptureRole/...) que nunca se llaman desde
+// antigravity-transcript.mjs; la captura descarta tool_calls y tool_results.
+//
+// AÑADIDO: redacción de secretos antes de que el texto entre a la memoria,
+// porque una clave pegada en el chat se guardaba tal cual.
 
-const ACK_RE = /^(?:ok|okay|k|yes|yep|no|nope|thanks|thank you|thx|done|收到|好的|好|嗯|可以|继续|不用|不需要|没了|好了)[.!?。！？\s]*$/i;
+const ACK_RE =
+  /^(?:ok|okay|k|yes|yep|no|nope|thanks|thank you|thx|done|收到|好的|好|嗯|可以|继续|不用|不需要|没了|好了)[.!?。！？\s]*$/i;
 const SLASH_COMMAND_RE = /^\/[a-z0-9_-]{1,64}\b/i;
+
 const METADATA_KEYS = [
   "session_id",
   "sessionid",
@@ -38,19 +33,7 @@ const METADATA_KEYS = [
   "permission_mode",
 ];
 
-function normalizeType(value) {
-  return String(value || "").toLowerCase().replace(/[-\s]/g, "_");
-}
-
-function isToolCallBlock(block) {
-  const type = normalizeType(block?.type || block?.kind || block?.role);
-  return TOOL_CALL_TYPES.has(type) || Boolean(block?.tool_calls) || Boolean(block?.function?.name);
-}
-
-function isToolResultBlock(block) {
-  const type = normalizeType(block?.type || block?.kind || block?.role);
-  return TOOL_RESULT_TYPES.has(type) || type === "tool" || type === "function";
-}
+// --- utilidades mínimas ------------------------------------------------------
 
 function oneLine(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
@@ -60,329 +43,6 @@ export function truncateCaptureText(text, maxChars = 2000) {
   const value = String(text || "").trim();
   if (!Number.isFinite(maxChars) || maxChars <= 0 || value.length <= maxChars) return value;
   return `${value.slice(0, Math.max(0, maxChars - 20)).trimEnd()}\n[truncated]`;
-}
-
-function stringifyCompact(value, maxChars) {
-  if (value == null) return "";
-  if (typeof value === "string") return truncateCaptureText(value, maxChars);
-  try {
-    return truncateCaptureText(JSON.stringify(value), maxChars);
-  } catch {
-    return truncateCaptureText(String(value), maxChars);
-  }
-}
-
-function parseMaybeJson(value) {
-  if (value == null || typeof value !== "string") return value;
-  const trimmed = value.trim();
-  if (!trimmed) return value;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return value;
-  }
-}
-
-function blockText(block) {
-  if (!block || typeof block !== "object") return "";
-  if (typeof block.text === "string") return block.text;
-  if (typeof block.output_text === "string") return block.output_text;
-  if (typeof block.input_text === "string") return block.input_text;
-  if (typeof block.content === "string") return block.content;
-  return "";
-}
-
-function toolName(block) {
-  return oneLine(
-    block?.name ||
-    block?.tool_name ||
-    block?.toolName ||
-    block?.function?.name ||
-    block?.call?.name ||
-    "",
-  );
-}
-
-function toolPayload(block, kind) {
-  if (!block || typeof block !== "object") return "";
-  if (kind === "call") {
-    return block.input ??
-      block.arguments ??
-      block.args ??
-      block.params ??
-      block.function?.arguments ??
-      block.command ??
-      block.call?.input ??
-      block.call?.arguments ??
-      "";
-  }
-  return block.output ??
-    block.result ??
-    block.error ??
-    block.data ??
-    block.content ??
-    block.text ??
-    "";
-}
-
-function toolId(block) {
-  return oneLine(
-    block?.call_id ||
-    block?.callId ||
-    block?.tool_call_id ||
-    block?.toolCallId ||
-    block?.tool_use_id ||
-    block?.toolUseId ||
-    block?.function_call_id ||
-    block?.functionCallId ||
-    block?.id ||
-    "",
-  );
-}
-
-function toolStatus(block, kind) {
-  if (kind === "call") return "running";
-  if (block?.is_error || block?.error) return "error";
-  const status = oneLine(block?.status || "");
-  return status || "completed";
-}
-
-function buildToolPart(block, kind, { toolMaxChars = 2000, toolNameById = {} } = {}) {
-  const id = toolId(block);
-  const name = toolName(block) || (id ? toolNameById[id] : "");
-  const payload = toolPayload(block, kind);
-  const part = {
-    type: "tool",
-    tool_id: id || undefined,
-    tool_name: name || undefined,
-    tool_status: toolStatus(block, kind),
-  };
-  if (kind === "call") {
-    const input = parseMaybeJson(payload);
-    if (input !== "" && input != null) {
-      part.tool_input = typeof input === "object" && !Array.isArray(input)
-        ? input
-        : { value: input };
-    }
-  } else {
-    part.tool_output = stringifyCompact(payload, toolMaxChars);
-  }
-  return part;
-}
-
-function formatToolBlock(block, kind, maxChars) {
-  const name = toolName(block);
-  const payload = toolPayload(block, kind);
-  const body = oneLine(stringifyCompact(payload, maxChars));
-  const label = kind === "call" ? "tool-call" : "tool-result";
-  return body
-    ? `[${label}${name ? ` ${name}` : ""}] ${body}`
-    : `[${label}${name ? ` ${name}` : ""}]`;
-}
-
-function blockToText(block, options) {
-  if (!block) return "";
-  if (typeof block === "string") return block;
-  if (Array.isArray(block)) return extractTextFromContent(block, options);
-  if (typeof block !== "object") return "";
-
-  if (block.item && typeof block.item === "object") {
-    const itemText = blockToText(block.item, options);
-    if (itemText) return itemText;
-  }
-
-  const type = normalizeType(block.type || block.kind || block.role);
-  if (TEXT_BLOCK_TYPES.has(type)) return blockText(block);
-  if (isToolCallBlock(block)) return formatToolBlock(block, "call", options.toolMaxChars);
-  if (isToolResultBlock(block)) return formatToolBlock(block, "result", options.toolMaxChars);
-  if (Array.isArray(block.content)) return extractTextFromContent(block.content, options);
-  if (!type) return blockText(block);
-  return "";
-}
-
-export function extractTextFromContent(content, options = {}) {
-  const opts = { toolMaxChars: 2000, ...options };
-  if (!content) return "";
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((block) => blockToText(block, opts))
-      .filter(Boolean)
-      .join("\n\n");
-  }
-  if (typeof content === "object") {
-    return blockToText(content, opts) || stringifyCompact(content, opts.toolMaxChars);
-  }
-  return "";
-}
-
-export function extractTextFromPayload(payload, options = {}) {
-  if (!payload || typeof payload !== "object") return "";
-  const chunks = [];
-  const directType = normalizeType(payload.type || payload.kind || payload.role);
-  if (TOOL_RESULT_TYPES.has(directType) || directType === "tool" || TOOL_CALL_TYPES.has(directType)) {
-    const direct = blockToText(payload, { toolMaxChars: 2000, ...options });
-    if (direct) return direct;
-  }
-
-  if (payload.message && typeof payload.message === "object") {
-    const messageText = extractTextFromPayload(payload.message, options);
-    if (messageText) chunks.push(messageText);
-  } else if (payload.content !== undefined) {
-    const contentText = extractTextFromContent(payload.content, options);
-    if (contentText) chunks.push(contentText);
-  }
-
-  for (const key of ["tool_calls", "toolCalls", "function_call", "functionCall", "tool_call", "toolCall"]) {
-    const value = payload[key];
-    if (!value) continue;
-    const toolText = extractTextFromContent(value, options);
-    if (toolText) chunks.push(toolText);
-  }
-
-  if (chunks.length === 0) {
-    const direct = blockToText(payload, { toolMaxChars: 2000, ...options });
-    if (direct) chunks.push(direct);
-  }
-
-  return chunks.join("\n\n");
-}
-
-function collectToolNamesByIdFromEntries(entries) {
-  const map = {};
-  for (const entry of entries || []) {
-    const payload = entry?.payload && typeof entry.payload === "object" ? entry.payload : entry;
-    collectToolNamesByIdFromPayload(payload, map);
-  }
-  return map;
-}
-
-function collectToolNamesByIdFromPayload(payload, out) {
-  if (!payload || typeof payload !== "object") return;
-  if (payload.message && typeof payload.message === "object") {
-    collectToolNamesByIdFromPayload(payload.message, out);
-  }
-  const candidates = [];
-  if (Array.isArray(payload.content)) candidates.push(...payload.content);
-  for (const key of ["tool_calls", "toolCalls", "function_call", "functionCall", "tool_call", "toolCall"]) {
-    const value = payload[key];
-    if (!value) continue;
-    if (Array.isArray(value)) candidates.push(...value);
-    else candidates.push(value);
-  }
-  if (isToolCallBlock(payload)) candidates.push(payload);
-  for (const block of candidates) {
-    if (!block || typeof block !== "object") continue;
-    if (!isToolCallBlock(block)) continue;
-    const id = toolId(block);
-    const name = toolName(block);
-    if (id && name) out[id] = name;
-  }
-}
-
-function extractPartsFromContent(content, options = {}) {
-  const opts = { toolMaxChars: 2000, toolNameById: {}, ...options };
-  const parts = [];
-  if (!content) return parts;
-  if (typeof content === "string") {
-    if (content.trim()) parts.push({ type: "text", text: content });
-    return parts;
-  }
-  if (!Array.isArray(content)) {
-    const text = blockToText(content, opts);
-    if (text.trim()) parts.push({ type: "text", text });
-    return parts;
-  }
-  for (const block of content) {
-    if (!block || typeof block !== "object") continue;
-    if (isToolCallBlock(block)) {
-      parts.push(buildToolPart(block, "call", opts));
-    } else if (isToolResultBlock(block)) {
-      parts.push(buildToolPart(block, "result", opts));
-    } else {
-      const text = blockToText(block, opts);
-      if (text.trim()) parts.push({ type: "text", text });
-    }
-  }
-  return parts;
-}
-
-export function extractPartsFromPayload(payload, options = {}) {
-  if (!payload || typeof payload !== "object") return [];
-  const opts = { toolMaxChars: 2000, toolNameById: {}, ...options };
-  if (payload.message && typeof payload.message === "object") {
-    return extractPartsFromPayload(payload.message, opts);
-  }
-
-  const directType = normalizeType(payload.type || payload.kind || payload.role);
-  if (TOOL_CALL_TYPES.has(directType) || isToolCallBlock(payload)) {
-    return [buildToolPart(payload, "call", opts)];
-  }
-  if (TOOL_RESULT_TYPES.has(directType) || directType === "tool" || directType === "function") {
-    return [buildToolPart(payload, "result", opts)];
-  }
-
-  const parts = [];
-  if (payload.content !== undefined) {
-    parts.push(...extractPartsFromContent(payload.content, opts));
-  }
-  for (const key of ["tool_calls", "toolCalls", "function_call", "functionCall", "tool_call", "toolCall"]) {
-    const value = payload[key];
-    if (!value) continue;
-    if (Array.isArray(value)) {
-      for (const block of value) parts.push(...extractPartsFromPayload(block, opts));
-    } else {
-      parts.push(...extractPartsFromPayload(value, opts));
-    }
-  }
-  return parts;
-}
-
-export function extractCaptureTurns(rolloutEntries, cfg = {}) {
-  const toolNameById = collectToolNamesByIdFromEntries(rolloutEntries);
-  const turns = [];
-  for (const entry of rolloutEntries || []) {
-    if (!entry || typeof entry !== "object") continue;
-    const payload = entry.payload && typeof entry.payload === "object" ? entry.payload : entry;
-    const message = payload.message && typeof payload.message === "object" ? payload.message : null;
-    const rawRole = message?.role || payload.role || payload.type || payload.kind;
-    const role = normalizeCaptureRole(rawRole);
-    if (!role) continue;
-    if (isAssistantSideCaptureRole(rawRole) && !cfg.captureAssistantTurns) continue;
-
-    const rawText = extractTextFromPayload(payload, { toolMaxChars: cfg.captureToolMaxChars });
-    const parts = extractPartsFromPayload(payload, {
-      toolMaxChars: cfg.captureToolMaxChars,
-      toolNameById,
-    });
-    const decision = shouldCaptureText(rawText, role, cfg);
-    if (!decision.shouldCapture && parts.length === 0) continue;
-    const text = decision.shouldCapture ? decision.text : "";
-    turns.push({ role, text, parts });
-  }
-  return turns;
-}
-
-export function normalizeCaptureRole(role) {
-  const value = normalizeType(role);
-  if (value === "user") return "user";
-  if (value === "assistant") return "assistant";
-  if (value === "tool" || value === "tool_result" || value === "function" || value === "function_call_output") {
-    return "user";
-  }
-  if (value === "tool_call" || value === "function_call") return "assistant";
-  return null;
-}
-
-export function isAssistantSideCaptureRole(role) {
-  const value = normalizeType(role);
-  return value === "assistant" ||
-    value === "tool" ||
-    value === "tool_result" ||
-    value === "tool_call" ||
-    value === "function" ||
-    value === "function_call" ||
-    value === "function_call_output";
 }
 
 function stripMetadataFences(text) {
@@ -428,7 +88,9 @@ function stripInjectedDigestBlocks(text) {
         continue;
       }
       if (
-        /^(?:[-*]\s+|#{1,6}\s+|More detail:|Use OpenViking MCP|Latest committed archive|Resume continuity|viking:\/\/)/i.test(trimmed) ||
+        /^(?:[-*]\s+|#{1,6}\s+|More detail:|Use OpenViking MCP|Latest committed archive|Resume continuity|viking:\/\/)/i.test(
+          trimmed,
+        ) ||
         /^\s{2,}\S/.test(line)
       ) {
         continue;
@@ -440,6 +102,52 @@ function stripInjectedDigestBlocks(text) {
 
   return out.join("\n");
 }
+
+// --- redacción de secretos ---------------------------------------------------
+// Se aplica al texto capturado (no a los logs, que ya se redactan aparte).
+
+export const SECRET_PATTERNS = [
+  // Claves privadas PEM completas
+  [
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    "[REDACTED_PRIVATE_KEY]",
+  ],
+  // JWT
+  [/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g, "[REDACTED_JWT]"],
+  // OpenAI / Anthropic / OpenRouter / DeepSeek
+  [/\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}\b/g, "[REDACTED_API_KEY]"],
+  // GitHub
+  [
+    /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
+    "[REDACTED_GITHUB_TOKEN]",
+  ],
+  // AWS
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "[REDACTED_AWS_KEY]"],
+  // Google API key
+  [/\bAIza[0-9A-Za-z_-]{30,}\b/g, "[REDACTED_GOOGLE_KEY]"],
+  // Slack
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "[REDACTED_SLACK_TOKEN]"],
+  // Authorization: Bearer <token>
+  [/\b(Bearer\s+)[A-Za-z0-9\-._~+/]{12,}=*/gi, "$1[REDACTED_BEARER]"],
+  // asignaciones api_key = "...", token: "...", password=...
+  [
+    /\b(api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|pwd)\b(\s*[:=]\s*)(["']?)([^\s"',;]{8,})\3/gi,
+    "$1$2$3[REDACTED]$3",
+  ],
+  // líneas estilo .env con nombre sensible
+  [
+    /^(\s*[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(\S{6,})\s*$/gm,
+    "$1[REDACTED]",
+  ],
+];
+
+export function redactSecrets(text) {
+  let value = String(text || "");
+  for (const [re, replacement] of SECRET_PATTERNS) value = value.replace(re, replacement);
+  return value;
+}
+
+// --- API del plugin ----------------------------------------------------------
 
 export function sanitizeCapturedText(text) {
   let value = String(text || "");
@@ -454,6 +162,7 @@ export function sanitizeCapturedText(text) {
   value = stripMetadataFences(value);
   value = stripInjectedDigestBlocks(value);
   value = value.replace(/^\s*More detail: use the OpenViking MCP .*$/gim, " ");
+  value = redactSecrets(value);
   return value
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")

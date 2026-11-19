@@ -3,14 +3,14 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "node /home/vladimir/.gemini/config/plugins/openviking-memory/scripts/antigravity-hook.mjs pre-invocation",
+        "command": "node {{PLUGIN_DIR}}/scripts/antigravity-hook.mjs pre-invocation",
         "timeout": 20
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "command": "node /home/vladimir/.gemini/config/plugins/openviking-memory/scripts/antigravity-hook.mjs stop",
+        "command": "node {{PLUGIN_DIR}}/scripts/antigravity-hook.mjs stop",
         "timeout": 20
       }
     ]

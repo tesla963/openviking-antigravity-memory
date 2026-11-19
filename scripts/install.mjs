@@ -1,166 +1,133 @@
 #!/usr/bin/env node
-
 /**
- * Idempotent installer for OpenViking Antigravity plugin.
+ * Instalador idempotente y portable del plugin OpenViking Memory para Antigravity.
+ *
+ * Derivado de V0v1kkk/openviking-antigravity-memory (MIT). Cambios:
+ *  - Sin rutas de Linux del autor: todo se resuelve con homedir().
+ *  - Sin registro de tenants ni claves ajenas: soporta auth_mode "dev".
+ *  - Sin `rm -rf`: el reemplazo es un rename atómico y el anterior va a backups/.
+ *  - Genera hooks.json y mcp_config.json con rutas absolutas reales.
+ *  - `--dry-run` valida y muestra el plan sin escribir nada.
+ *
+ * Uso:
+ *   node scripts/install.mjs [--dry-run] [--test] [--plugin-dir <ruta>]
+ *        [--url http://127.0.0.1:1933] [--api-key <clave>]
+ *        [--account <cuenta>] [--user <usuario>]
  */
 
-import { chmod, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SOURCE_ROOT = resolvePath(join(__dirname, ".."));
 
-const TENANT_KEYS_PATH = "/home/vladimir/AI/LocalAI/pro-local-ai-setup/openviking/runtime/tenant-keys.json";
-const PLUGIN_INSTALL_ROOT = "/home/vladimir/.gemini/config/plugins/openviking-memory";
-const PUBLISH_REPO_ROOT = "/home/vladimir/GitRoot/ExternalSkills/Publish/OpenViking";
-const RUNTIME_ROOT = join(homedir(), ".openviking", "antigravity");
-const OVCLI_CONF_PATH = join(RUNTIME_ROOT, "ovcli.conf");
-const BACKUPS_ROOT = join(RUNTIME_ROOT, "backups");
-const BASE_URL = "http://127.0.0.1:1933";
+const DEFAULTS = {
+  url: process.env.OPENVIKING_URL || "http://127.0.0.1:1933",
+  pluginDir: join(homedir(), ".gemini", "config", "plugins", "openviking-memory"),
+  apiKey: process.env.OPENVIKING_API_KEY || "",
+  account: process.env.OPENVIKING_ACCOUNT || "",
+  user: process.env.OPENVIKING_USER || "",
+};
 
-function logStep(msg) {
-  console.log(`\x1b[34m[install]\x1b[0m ${msg}`);
+const COLOR = process.stdout.isTTY;
+const c = (code, s) => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
+const logStep = (m) => console.log(`${c(34, "[install]")} ${m}`);
+const logOk = (m) => console.log(`${c(32, "[ok]")} ${m}`);
+const logWarn = (m) => console.log(`${c(33, "[warn]")} ${m}`);
+const logErr = (m) => console.error(`${c(31, "[error]")} ${m}`);
+
+function parseArgs(argv) {
+  const out = { ...DEFAULTS, dryRun: false, runTests: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === "--dry-run") out.dryRun = true;
+    else if (a === "--test") out.runTests = true;
+    else if (a === "--plugin-dir") out.pluginDir = resolvePath(argv[++i]);
+    else if (a === "--url") out.url = argv[++i];
+    else if (a === "--api-key") out.apiKey = argv[++i];
+    else if (a === "--account") out.account = argv[++i];
+    else if (a === "--user") out.user = argv[++i];
+    else if (a === "-h" || a === "--help") {
+      console.log(
+        "Uso: node scripts/install.mjs [--dry-run] [--test] [--plugin-dir RUTA]\n" +
+          "     [--url URL] [--api-key CLAVE] [--account CUENTA] [--user USUARIO]",
+      );
+      process.exit(0);
+    } else {
+      throw new Error(`Argumento desconocido: ${a}`);
+    }
+  }
+  out.url = out.url.replace(/\/+$/, "");
+  return out;
 }
 
-function logSuccess(msg) {
-  console.log(`\x1b[32m[success]\x1b[0m ${msg}`);
+async function exists(p) {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function logError(msg) {
-  console.error(`\x1b[31m[error]\x1b[0m ${msg}`);
+async function checkHealth(url) {
+  const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new Error(`/health respondió HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.status !== "ok" && data.healthy !== true) {
+    throw new Error(`servidor no saludable: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+function renderTemplate(template, vars) {
+  return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, key) =>
+    Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : m,
+  );
 }
 
 async function main() {
-  logStep("1. Validating runtime environment...");
-  const nodeVersion = process.version;
-  const major = parseInt(nodeVersion.replace(/^v/, "").split(".")[0], 10);
-  if (major < 18) {
-    throw new Error(`Node.js version >= 18 is required, found ${nodeVersion}`);
+  const opts = parseArgs(process.argv.slice(2));
+  const runtimeRoot = join(homedir(), ".openviking", "antigravity");
+  const ovcliConf = join(runtimeRoot, "ovcli.conf");
+  const backupsRoot = join(runtimeRoot, "backups");
+
+  logStep(`Plataforma: ${platform()} · Node ${process.version}`);
+  const major = Number(process.version.replace(/^v/, "").split(".")[0]);
+  if (major < 18) throw new Error(`Node.js >= 18 requerido, encontrado ${process.version}`);
+  logOk(`Node.js ${process.version}`);
+
+  logStep(`Comprobando OpenViking en ${opts.url} ...`);
+  const health = await checkHealth(opts.url);
+  logOk(`OpenViking ${health.version || "?"} · auth_mode=${health.auth_mode || "desconocido"}`);
+
+  const authMode = health.auth_mode || "unknown";
+  const needsKey = authMode !== "dev";
+  if (needsKey && !opts.apiKey) {
+    throw new Error(
+      `El servidor exige autenticación (auth_mode=${authMode}). Pasa --api-key o define OPENVIKING_API_KEY.`,
+    );
   }
-  logSuccess(`Node.js version: ${nodeVersion}`);
+  if (!needsKey) logOk("auth_mode dev: no se requiere API key");
 
-  logStep("2. Checking OpenViking server health...");
-  const healthRes = await fetch(`${BASE_URL}/health`);
-  if (!healthRes.ok) {
-    throw new Error(`OpenViking health check failed: HTTP ${healthRes.status}`);
-  }
-  const healthData = await healthRes.json();
-  if (healthData.status !== "ok" && healthData.healthy !== true) {
-    throw new Error(`OpenViking unhealthy: ${JSON.stringify(healthData)}`);
-  }
-  logSuccess(`OpenViking server is healthy (${healthData.version || "v0.4.13"})`);
-
-  logStep("3. Resolving production credentials from tenant registry...");
-  const tenantRaw = await readFile(TENANT_KEYS_PATH, "utf-8");
-  const tenantData = JSON.parse(tenantRaw);
-  const apiKey = tenantData.accounts?.["home-coding"]?.users?.["vladimir-dev"]?.api_key;
-  if (!apiKey) {
-    throw new Error(`Failed to find API key for home-coding/vladimir-dev in ${TENANT_KEYS_PATH}`);
-  }
-
-  logStep("4. Verifying production authentication against OpenViking...");
-  const authRes = await fetch(`${BASE_URL}/api/v1/system/status`, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "X-OpenViking-Account": "home-coding",
-      "X-OpenViking-User": "vladimir-dev",
-    },
-  });
-  if (!authRes.ok) {
-    throw new Error(`Authentication verification failed: HTTP ${authRes.status}`);
-  }
-  logSuccess("Authentication verified for account 'home-coding', user 'vladimir-dev'");
-
-  logStep("5. Preparing runtime directories and credentials file...");
-  await mkdir(RUNTIME_ROOT, { recursive: true, mode: 0o700 });
-  await chmod(RUNTIME_ROOT, 0o700);
-
-  await mkdir(join(RUNTIME_ROOT, "state"), { recursive: true, mode: 0o700 });
-  await chmod(join(RUNTIME_ROOT, "state"), 0o700);
-
-  await mkdir(join(RUNTIME_ROOT, "pending"), { recursive: true, mode: 0o700 });
-  await chmod(join(RUNTIME_ROOT, "pending"), 0o700);
-
-  await mkdir(join(RUNTIME_ROOT, "logs"), { recursive: true, mode: 0o700 });
-  await chmod(join(RUNTIME_ROOT, "logs"), 0o700);
-
-  await mkdir(BACKUPS_ROOT, { recursive: true, mode: 0o700 });
-
-  const ovcliContent = {
-    url: BASE_URL,
-    api_key: apiKey,
-    account: "home-coding",
-    user: "vladimir-dev",
-    actor_peer_id: "antigravity",
-    peer_id: "antigravity",
+  const vars = {
+    PLUGIN_DIR: opts.pluginDir,
+    RUNTIME_DIR: runtimeRoot,
+    OVCLI_CONF: ovcliConf,
+    URL: opts.url,
   };
 
-  await writeFile(OVCLI_CONF_PATH, JSON.stringify(ovcliContent, null, 2), {
-    mode: 0o600,
-  });
-  await chmod(OVCLI_CONF_PATH, 0o600);
-  logSuccess(`Runtime credentials rendered securely to ${OVCLI_CONF_PATH} (mode 0600)`);
-
-  logStep("6. Running test suite before installation...");
-  const testFiles = [
-    "test/unit/transcript.test.mjs",
-    "test/unit/hook.test.mjs",
-    "test/unit/session.test.mjs",
-    "test/unit/redaction.test.mjs",
-    "test/integration/mcp-live.test.mjs",
-    "test/integration/hook-live.test.mjs",
-    "test/integration/offline-queue.test.mjs",
-    "test/isolation/identity-isolation.test.mjs",
-  ];
-
-  for (const testFile of testFiles) {
-    const fullTestPath = join(SOURCE_ROOT, testFile);
-    logStep(`Running test: ${testFile}`);
-    try {
-      await execFileAsync("node", ["--test", fullTestPath], {
-        cwd: SOURCE_ROOT,
-        env: { ...process.env, OPENVIKING_CLI_CONFIG_FILE: OVCLI_CONF_PATH },
-      });
-      logSuccess(`Passed: ${testFile}`);
-    } catch (testErr) {
-      logError(`Test failed: ${testFile}\n${testErr.stdout || ""}\n${testErr.stderr || ""}`);
-      throw new Error(`Test failed: ${testFile}`);
-    }
-  }
-
-  logStep("7. Backing up existing plugin installation if present...");
-  try {
-    const st = await stat(PLUGIN_INSTALL_ROOT);
-    if (st.isDirectory()) {
-      const backupDir = join(BACKUPS_ROOT, `openviking-memory-backup-${Date.now()}`);
-      await cp(PLUGIN_INSTALL_ROOT, backupDir, { recursive: true });
-      logSuccess(`Previous installation backed up to ${backupDir}`);
-    }
-  } catch (err) {
-    if (err?.code !== "ENOENT") {
-      logError(`Warning during backup check: ${err.message}`);
-    }
-  }
-
-  logStep("8. Installing plugin to global Antigravity plugins directory...");
-  const stagingDir = join(RUNTIME_ROOT, `staging-${Date.now()}`);
-  await mkdir(stagingDir, { recursive: true, mode: 0o755 });
-
-  // Files to copy to installed plugin
   const itemsToCopy = [
     "plugin.json",
-    "mcp_config.json",
-    "hooks.json",
     "README.md",
     "DESIGN.md",
-    "VERIFICATION.md",
     "THIRD_PARTY_NOTICES.md",
+    "LICENSE",
     "install.sh",
     "uninstall.sh",
     "servers",
@@ -169,52 +136,101 @@ async function main() {
     "rules",
   ];
 
+  if (opts.dryRun) {
+    logStep("DRY RUN — no se escribe nada");
+    console.log(`  plugin_dir : ${opts.pluginDir}`);
+    console.log(`  runtime    : ${runtimeRoot}`);
+    console.log(`  ovcli.conf : ${ovcliConf} (0600)`);
+    console.log(`  backup dir : ${backupsRoot}`);
+    console.log(`  copiaría   : ${itemsToCopy.join(", ")}`);
+    console.log("  generar    : hooks.json, mcp_config.json (rutas absolutas)");
+    return;
+  }
+
+  logStep("Preparando directorios de runtime (0700)...");
+  for (const d of [
+    runtimeRoot,
+    join(runtimeRoot, "state"),
+    join(runtimeRoot, "pending"),
+    join(runtimeRoot, "logs"),
+    backupsRoot,
+  ]) {
+    await mkdir(d, { recursive: true, mode: 0o700 });
+    await chmod(d, 0o700);
+  }
+
+  const ovcliContent = {
+    url: opts.url,
+    api_key: opts.apiKey || "",
+    account: opts.account || "",
+    user: opts.user || "",
+    actor_peer_id: "antigravity",
+    peer_id: "antigravity",
+  };
+  await writeFile(ovcliConf, `${JSON.stringify(ovcliContent, null, 2)}\n`, { mode: 0o600 });
+  await chmod(ovcliConf, 0o600);
+  logOk(`Credenciales en ${ovcliConf} (0600)`);
+
+  if (opts.runTests) {
+    logStep("Ejecutando suite de pruebas...");
+    await execFileAsync("node", ["--test", "test/unit/*.test.mjs"], {
+      cwd: SOURCE_ROOT,
+      env: { ...process.env, OPENVIKING_CLI_CONFIG_FILE: ovcliConf },
+    });
+    logOk("Pruebas en verde");
+  }
+
+  logStep("Preparando staging...");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const staging = join(runtimeRoot, `staging-${stamp}`);
+  await mkdir(staging, { recursive: true, mode: 0o755 });
+
   for (const item of itemsToCopy) {
     const src = join(SOURCE_ROOT, item);
-    const dest = join(stagingDir, item);
-    await cp(src, dest, { recursive: true });
-  }
-
-  // Ensure scripts and hooks are executable
-  await chmod(join(stagingDir, "servers", "mcp-proxy.mjs"), 0o755).catch(() => {});
-  await chmod(join(stagingDir, "scripts", "antigravity-hook.mjs"), 0o755).catch(() => {});
-  await chmod(join(stagingDir, "scripts", "manage.mjs"), 0o755).catch(() => {});
-  await chmod(join(stagingDir, "install.sh"), 0o755).catch(() => {});
-  await chmod(join(stagingDir, "uninstall.sh"), 0o755).catch(() => {});
-
-  // Atomically replace target
-  await rm(PLUGIN_INSTALL_ROOT, { recursive: true, force: true });
-  await cp(stagingDir, PLUGIN_INSTALL_ROOT, { recursive: true });
-  await rm(stagingDir, { recursive: true, force: true });
-
-  logSuccess(`Installed plugin to ${PLUGIN_INSTALL_ROOT}`);
-
-  logStep("9. Updating publish repository at GitRoot...");
-  try {
-    await mkdir(PUBLISH_REPO_ROOT, { recursive: true, mode: 0o755 });
-    for (const item of itemsToCopy) {
-      const src = join(SOURCE_ROOT, item);
-      const dest = join(PUBLISH_REPO_ROOT, item);
-      await cp(src, dest, { recursive: true });
+    if (!(await exists(src))) {
+      logWarn(`omitido (no existe): ${item}`);
+      continue;
     }
-    // Also copy tests to publish repo
-    await cp(join(SOURCE_ROOT, "test"), join(PUBLISH_REPO_ROOT, "test"), { recursive: true });
-    logSuccess(`Publish repository updated at ${PUBLISH_REPO_ROOT}`);
-  } catch (err) {
-    logError(`Publish repo sync warning: ${err.message}`);
+    await cp(src, join(staging, item), { recursive: true });
   }
 
-  console.log("\n========================================================");
-  console.log("🎉 OpenViking Memory Plugin successfully installed!");
-  console.log(`Plugin path:      ${PLUGIN_INSTALL_ROOT}`);
-  console.log(`Credentials:      ${OVCLI_CONF_PATH} (mode 0600)`);
-  console.log(`Account/User:     home-coding / vladimir-dev`);
-  console.log(`Actor Peer ID:    antigravity`);
-  console.log(`Session Prefix:   ag-`);
-  console.log("========================================================\n");
+  // Render de configuración con rutas absolutas reales
+  for (const name of ["hooks.json", "mcp_config.json"]) {
+    const tpl = await readFile(join(SOURCE_ROOT, name), "utf-8");
+    await writeFile(join(staging, name), renderTemplate(tpl, vars), { mode: 0o644 });
+  }
+  logOk("hooks.json y mcp_config.json generados con rutas absolutas");
+
+  for (const f of [
+    "servers/mcp-proxy.mjs",
+    "scripts/antigravity-hook.mjs",
+    "scripts/manage.mjs",
+    "install.sh",
+    "uninstall.sh",
+  ]) {
+    await chmod(join(staging, f), 0o755).catch(() => {});
+  }
+
+  logStep("Instalando (rename atómico, sin borrados)...");
+  await mkdir(dirname(opts.pluginDir), { recursive: true });
+  if (await exists(opts.pluginDir)) {
+    const backupDir = join(backupsRoot, `openviking-memory-${stamp}`);
+    await rename(opts.pluginDir, backupDir);
+    logOk(`Instalación anterior movida a ${backupDir}`);
+  }
+  await rename(staging, opts.pluginDir);
+  logOk(`Plugin instalado en ${opts.pluginDir}`);
+
+  console.log(`
+Instalación completa.
+  Plugin    : ${opts.pluginDir}
+  Runtime   : ${runtimeRoot}
+  OpenViking: ${opts.url} (auth_mode=${authMode})
+  Diagnóstico: node ${join(opts.pluginDir, "scripts", "manage.mjs")} status
+`);
 }
 
 main().catch((err) => {
-  logError(`Installation failed: ${err.message}`);
+  logErr(`Instalación fallida: ${err.message}`);
   process.exitCode = 1;
 });

@@ -13,6 +13,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "./config.mjs";
+import { unwrapEnvelope } from "./shared/ov-response.mjs";
 import { resolveOpenVikingCredentials } from "./shared/credentials.mjs";
 import { listPending, replayPending } from "./shared/pending-queue.mjs";
 
@@ -43,7 +44,9 @@ function makeFetchJSON(creds, cfg) {
       const text = await res.text();
       let result = null;
       try { result = JSON.parse(text); } catch { result = text; }
-      return { ok: res.ok, status: res.status, result: res.ok ? result : undefined, error: !res.ok ? (result?.error?.message || result?.detail || result || `HTTP ${res.status}`) : undefined };
+      // Ver nota en antigravity-hook.mjs: /api/v1/* viene envuelto en {status, result}.
+      const payload = unwrapEnvelope(result);
+      return { ok: res.ok, status: res.status, result: res.ok ? payload : undefined, error: !res.ok ? (result?.error?.message || result?.detail || result || `HTTP ${res.status}`) : undefined };
     } catch (err) {
       return { ok: false, status: 0, error: err?.message || String(err) };
     } finally {
@@ -127,7 +130,7 @@ async function cmdFlush(cfg, creds, targetConversationId) {
     console.log(`Committing session ${sid}...`);
     const res = await fetchJSON(`/api/v1/sessions/${encodeURIComponent(sid)}/commit`, {
       method: "POST",
-      body: JSON.stringify({ keep_recent_messages: cfg.commitKeepRecentCount }),
+      body: JSON.stringify({ keep_recent_count: cfg.commitKeepRecentCount }),
     });
     if (res.ok) {
       console.log(`  -> Success (task: ${res.result?.task_id || "ok"})`);

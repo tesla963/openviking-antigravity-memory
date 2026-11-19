@@ -19,6 +19,7 @@ import { maybeDetach, readHookStdin } from "./shared/async-writer.mjs";
 import { sendSessionMessages } from "./shared/batch-send.mjs";
 import { buildServerAssembledBlock, buildRecallBlock } from "./shared/recall-core.mjs";
 import { replayPending } from "./shared/pending-queue.mjs";
+import { unwrapEnvelope } from "./shared/ov-response.mjs";
 import {
   extractLatestUserPrompt,
   extractCaptureTurnsFromTranscript,
@@ -125,10 +126,14 @@ function makeFetchJSON(creds, cfg) {
       } catch {
         result = text;
       }
+      // OpenViking envuelve las respuestas de /api/v1/* como {status, result}.
+      // Sin desempaquetar, recall-core leía result.entries sobre el sobre y
+      // SIEMPRE obtenía 0: el auto-recall quedaba mudo sin fallar.
+      const payload = unwrapEnvelope(result);
       return {
         ok: res.ok,
         status: res.status,
-        result: res.ok ? result : undefined,
+        result: res.ok ? payload : undefined,
         error: !res.ok ? (result?.error?.message || result?.detail || result || `HTTP ${res.status}`) : undefined,
       };
     } catch (err) {
@@ -157,7 +162,7 @@ async function sweepIdleSessions(fetchJSON, cfg, log) {
           const sid = `${cfg.sessionPrefix}${state.conversationId}`;
           const commitRes = await fetchJSON(`/api/v1/sessions/${encodeURIComponent(sid)}/commit`, {
             method: "POST",
-            body: JSON.stringify({ keep_recent_messages: cfg.commitKeepRecentCount }),
+            body: JSON.stringify({ keep_recent_count: cfg.commitKeepRecentCount }),
           });
           if (commitRes.ok) {
             state.lastCommittedAt = now;
@@ -338,7 +343,7 @@ export async function handleStopWorker(payload, cfg, creds, log) {
         log("threshold_commit_start", { sessionId, pendingTokens });
         const commitRes = await fetchJSON(`/api/v1/sessions/${encodeURIComponent(sessionId)}/commit`, {
           method: "POST",
-          body: JSON.stringify({ keep_recent_messages: cfg.commitKeepRecentCount }),
+          body: JSON.stringify({ keep_recent_count: cfg.commitKeepRecentCount }),
         });
         if (commitRes.ok) {
           state.lastCommittedAt = Date.now();

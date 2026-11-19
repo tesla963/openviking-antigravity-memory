@@ -30,7 +30,7 @@ const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_TTL_DAYS = 7;
 const DEFAULT_REPLAY_LIMIT = 50;
 const PROCESSING_STALE_MS = 10 * 60 * 1000;
-const DEFAULT_PENDING_DIR = () => join(homedir(), ".openviking", "pending");
+const DEFAULT_PENDING_DIR = () => join(homedir(), ".openviking", "antigravity", "pending");
 
 // Pending queue files may contain raw memory payload / transcript content.
 // Use restrictive permissions explicitly so we don't depend on umask.

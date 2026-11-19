@@ -1,24 +1,28 @@
-// GENERATED FROM examples/memory-plugin-shared/lib. DO NOT EDIT.
-/**
- * Shared structured debug logger for OpenViking memory plugin hook scripts.
- *
- * Harness-specific wrappers load config and pass {debug, debugLogPath}. This
- * module stays path-agnostic so it can be vendored into each plugin snapshot.
- */
+// debug-log.mjs
+// Derivado de V0v1kkk/openviking-antigravity-memory (MIT).
+// Cambio: TODO lo que se escribe al log pasa por redactSecrets() y por el
+// scrubbing explícito de la API key de la sesión. El original escribía el
+// payload tal cual (el test de redacción no lo detectaba porque nunca le
+// pasaba la clave a log()).
 
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { redactSecrets } from "./capture-utils.mjs";
 
 function ensureDir(filePath) {
   try {
     mkdirSync(dirname(filePath), { recursive: true });
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
 }
 
-function writeLine(filePath, obj) {
+function writeLine(filePath, line) {
   try {
-    appendFileSync(filePath, JSON.stringify(obj) + "\n");
-  } catch { /* best effort */ }
+    appendFileSync(filePath, `${line}\n`);
+  } catch {
+    /* best effort */
+  }
 }
 
 function localISO() {
@@ -33,6 +37,18 @@ function localISO() {
   );
 }
 
+function scrub(value, secret) {
+  let text;
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  text = redactSecrets(text);
+  if (secret && secret.length >= 8) text = text.split(secret).join("[REDACTED_API_KEY]");
+  return text;
+}
+
 const noop = () => {};
 
 export function createLogger(hookName, overrideCfg) {
@@ -43,15 +59,16 @@ export function createLogger(hookName, overrideCfg) {
   if (!logPath) return { log: noop, logError: noop };
   ensureDir(logPath);
 
+  const secret = c.apiKey;
+
   function log(stage, data) {
-    writeLine(logPath, { ts: localISO(), hook: hookName, stage, data });
+    writeLine(logPath, scrub({ ts: localISO(), hook: hookName, stage, data }, secret));
   }
 
   function logError(stage, err) {
-    const error = err instanceof Error
-      ? { message: err.message, stack: err.stack }
-      : String(err);
-    writeLine(logPath, { ts: localISO(), hook: hookName, stage, error });
+    const error =
+      err instanceof Error ? { message: err.message, stack: err.stack } : String(err);
+    writeLine(logPath, scrub({ ts: localISO(), hook: hookName, stage, error }, secret));
   }
 
   return { log, logError };
