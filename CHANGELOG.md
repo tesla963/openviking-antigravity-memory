@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-09-27 — backfill de paneles históricos
+
+- Nuevo `scripts/shared/sqlite-transcript.mjs`: lee las bases de conversaciones de
+  Antigravity (IDE y CLI) en solo lectura y decodifica el protobuf de los pasos.
+  Campos verificados contra `trajectory_steps_go_proto` del binario:
+  `type=14 → .19.2` (usuario), `type=15 → .20.1` (asistente); se descartan
+  thinking (`.20.3`), herramientas (132), sistema (90/17/101) y pasos no completados.
+- Nuevo comando `manage.mjs backfill [--dry-run] [--only=<id>]`: vuelca el
+  histórico reutilizando el mismo hash y el mismo archivo de estado que el hook
+  `Stop`, así que un panel ya capturado en vivo no se duplica.
+- Los mensajes llevan `created_at` por turno cuando se puede leer del metadata,
+  para que el pasado no se aplane en la fecha de hoy.
+- **hooks.json usa la ruta absoluta del intérprete** (`process.execPath`):
+  Antigravity ejecuta con `/bin/sh -c`, que no hereda el PATH; con `node` a secas
+  el hook moría con `sh: node: command not found` (262 casos en el log, exit 127)
+  y por eso no había ni una sola captura.
+
 ## [0.2.1] - 2026-09-27 — correcciones de la revisión de pares
 
 Revisión hecha por Antigravity (Herdr, pane t19) sobre 544b841. Veredicto:

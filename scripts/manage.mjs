@@ -10,12 +10,22 @@
  *   node manage.mjs replay
  */
 
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.mjs";
 import { unwrapEnvelope } from "./shared/ov-response.mjs";
 import { resolveOpenVikingCredentials } from "./shared/credentials.mjs";
 import { listPending, replayPending } from "./shared/pending-queue.mjs";
+import { sendSessionMessages } from "./shared/batch-send.mjs";
+import { shouldCaptureText } from "./shared/capture-utils.mjs";
+import { computeTurnHash } from "./antigravity-transcript.mjs";
+import { extractTurnsFromDb } from "./shared/sqlite-transcript.mjs";
+
+const CONVERSATION_DIRS = [
+  join(homedir(), ".gemini", "antigravity", "conversations"),
+  join(homedir(), ".gemini", "antigravity-cli", "conversations"),
+];
 
 function redactKey(key) {
   if (!key) return "<none>";
@@ -147,6 +157,148 @@ async function cmdReplay(cfg, creds) {
   console.log(`Done. Replayed: ${result.replayed}, Failed: ${result.failed}, Skipped: ${result.skipped}, Deferred: ${result.deferred}`);
 }
 
+function backfillStatePath(cfg, conversationId) {
+  return join(cfg.stateDir, `session_${conversationId}.json`);
+}
+
+async function loadBackfillState(cfg, conversationId) {
+  try {
+    const data = JSON.parse(await readFile(backfillStatePath(cfg, conversationId), "utf-8"));
+    return { data, hashes: new Set(Array.isArray(data.capturedHashes) ? data.capturedHashes : []) };
+  } catch {
+    return { data: { conversationId }, hashes: new Set() };
+  }
+}
+
+/**
+ * Vuelca a OpenViking las conversaciones históricas de Antigravity (IDE y CLI).
+ *
+ * Idempotente por diseño: usa los mismos hashes y el mismo archivo de estado que
+ * el hook Stop, así que un panel ya capturado en vivo nunca se duplica.
+ * `--dry-run` no escribe nada en el servidor.
+ */
+async function cmdBackfill(cfg, creds, args = []) {
+  const dryRun = args.includes("--dry-run");
+  const onlyArg = args.map((a) => /^--only=(.+)$/.exec(a)).find(Boolean);
+  const only = onlyArg ? onlyArg[1] : null;
+  const fetchJSON = makeFetchJSON(creds, cfg);
+
+  const rows = [];
+  const totals = { user: 0, assistant: 0, chars: 0, skipped: 0, conversations: 0 };
+
+  for (const dir of CONVERSATION_DIRS) {
+    let files = [];
+    try {
+      files = (await readdir(dir)).filter((f) => f.endsWith(".db"));
+    } catch {
+      continue;
+    }
+    for (const file of files.sort()) {
+      const conversationId = file.replace(/\.db$/, "");
+      if (only && conversationId !== only) continue;
+
+      let turns = [];
+      try {
+        turns = extractTurnsFromDb(join(dir, file));
+      } catch (err) {
+        console.error(`  ! ${conversationId}: ${err.message}`);
+        continue;
+      }
+      if (turns.length === 0) continue;
+
+      const { data, hashes } = await loadBackfillState(cfg, conversationId);
+      const kept = [];
+      for (const turn of turns) {
+        const verdict = shouldCaptureText(turn.content, turn.role, cfg);
+        if (!verdict.shouldCapture) {
+          totals.skipped += 1;
+          continue;
+        }
+        const hash = computeTurnHash(conversationId, turn.idx, turn.role, verdict.text);
+        if (hashes.has(hash)) {
+          totals.skipped += 1;
+          continue;
+        }
+        kept.push({
+          hash,
+          role: turn.role,
+          content: verdict.text,
+          created_at: turn.createdAt || undefined,
+        });
+      }
+      if (kept.length === 0) continue;
+
+      const chars = kept.reduce((n, k) => n + k.content.length, 0);
+      rows.push({ conversationId, dir, turns: turns.length, kept, chars, data, hashes });
+      totals.conversations += 1;
+      totals.chars += chars;
+      for (const k of kept) totals[k.role] += 1;
+    }
+  }
+
+  console.log(`\n=== Backfill de paneles de Antigravity ${dryRun ? "(DRY RUN, no se envía nada)" : ""} ===\n`);
+  for (const row of rows) {
+    const kind = row.dir.includes("antigravity-cli") ? "CLI" : "IDE";
+    console.log(
+      `  ${kind}  ${row.conversationId}  ${String(row.kept.length).padStart(3)} turnos  ${row.chars.toLocaleString()} chars`,
+    );
+  }
+  if (rows.length === 0) {
+    console.log("  (nada nuevo que volcar)");
+    return;
+  }
+
+  const tokens = Math.round(totals.chars / 4);
+  console.log(
+    `\n  Conversaciones: ${totals.conversations} · user ${totals.user} · asistente ${totals.assistant}` +
+      ` · ${totals.chars.toLocaleString()} chars ≈ ${tokens.toLocaleString()} tokens · omitidos ${totals.skipped}`,
+  );
+
+  if (dryRun) {
+    console.log("\n  Nada enviado. Revisa los números y vuelve a correr sin --dry-run para aplicar.\n");
+    return;
+  }
+
+  await mkdir(cfg.stateDir, { recursive: true, mode: 0o700 });
+  let sent = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const sessionId = `${cfg.sessionPrefix}${row.conversationId}`;
+    const payloads = row.kept.map(({ role, content, created_at }) => ({
+      role,
+      content,
+      ...(created_at ? { created_at } : {}),
+    }));
+    const result = await sendSessionMessages(fetchJSON, sessionId, payloads);
+    sent += result.sent;
+    failed += result.failed;
+
+    if (result.sent > 0) {
+      await fetchJSON(`/api/v1/sessions/${encodeURIComponent(sessionId)}/commit`, {
+        method: "POST",
+        body: JSON.stringify({ keep_recent_count: 0 }),
+      });
+      for (const k of row.kept.slice(0, result.sent)) row.hashes.add(k.hash);
+      await writeFile(
+        backfillStatePath(cfg, row.conversationId),
+        `${JSON.stringify(
+          {
+            ...row.data,
+            conversationId: row.conversationId,
+            capturedHashes: [...row.hashes].slice(-500),
+            lastBackfillAt: Date.now(),
+          },
+          null,
+          2,
+        )}\n`,
+        { mode: 0o600 },
+      );
+    }
+    console.log(`  → ${sessionId}: ${result.sent} enviados, ${result.failed} fallidos`);
+  }
+  console.log(`\n  Total: ${sent} mensajes enviados, ${failed} fallidos. El commit es asíncrono.\n`);
+}
+
 async function main() {
   const cmd = (process.argv[2] || "status").toLowerCase();
   const cfg = loadConfig();
@@ -168,8 +320,13 @@ async function main() {
     case "replay":
       await cmdReplay(cfg, creds);
       break;
+    case "backfill":
+      await cmdBackfill(cfg, creds, process.argv.slice(3));
+      break;
     default:
-      console.error(`Unknown command: ${cmd}. Available: status, list, flush, replay`);
+      console.error(
+        `Unknown command: ${cmd}. Available: status, list, flush, replay, backfill [--dry-run] [--only=<id>]`,
+      );
       process.exitCode = 1;
   }
 }
