@@ -64,7 +64,8 @@ git rm scripts/shared/profile-inject.mjs \
 git commit -m "chore: prune modules with no importers"
 ```
 
-Se ahorran ~608 líneas. `recall-compress-core.mjs` **no** se poda: lo importa
+Se ahorran exactamente 633 líneas (verificado con `git show --stat`).
+`recall-compress-core.mjs` **no** se poda: lo importa
 `recall-core.mjs` (el upstream lo daba por huérfano y habría roto el recall).
 
 ## Compatibilidad
