@@ -80,6 +80,33 @@ describe("seguridad de datos", () => {
     assert.ok(text.includes("rename("), "debe usar rename atómico");
   });
 
+  it("el staging se crea junto al destino y hay rollback", async () => {
+    const text = await read("scripts/install.mjs");
+    assert.ok(
+      text.includes(".openviking-memory-staging-"),
+      "el staging debe vivir junto al plugin para evitar EXDEV",
+    );
+    assert.ok(!text.includes("join(runtimeRoot, `staging-"), "no debe usar runtimeRoot");
+    assert.ok(text.includes("backupDir"), "debe restaurar el backup si falla el rename");
+    assert.ok(text.includes("Rollback aplicado"), "debe registrar el rollback");
+  });
+
+  it("el hook resuelve credenciales con el ovcli.conf del plugin", async () => {
+    const text = await read("scripts/antigravity-hook.mjs");
+    assert.ok(text.includes("OPENVIKING_CLI_CONFIG_FILE: cfg.cliConfigFile"));
+    assert.ok(
+      text.includes("apiKey: creds.apiKey"),
+      "el logger debe recibir la key para el scrub literal",
+    );
+  });
+
+  it("uninstall crea el backup antes de condicionar", async () => {
+    const text = await read("uninstall.sh");
+    const mkdirAt = text.indexOf('mkdir -p "$BACKUP_DIR"');
+    const ifAt = text.indexOf('if [[ -d "$PLUGIN_DIR" ]]');
+    assert.ok(mkdirAt > 0 && ifAt > 0 && mkdirAt < ifAt);
+  });
+
   it("el runtime se crea bajo el home del usuario", async () => {
     const text = await read("scripts/install.mjs");
     assert.ok(text.includes('join(homedir(), ".openviking", "antigravity")'));

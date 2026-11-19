@@ -15,8 +15,9 @@ for arg in "$@"; do
   [[ "$arg" == "--purge" ]] && PURGE=true
 done
 
+mkdir -p "$BACKUP_DIR"
+
 if [[ -d "$PLUGIN_DIR" ]]; then
-  mkdir -p "$BACKUP_DIR"
   mv "$PLUGIN_DIR" "$BACKUP_DIR/plugin"
   echo "[uninstall] Plugin movido a $BACKUP_DIR/plugin (nada se borró)"
 else

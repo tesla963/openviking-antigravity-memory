@@ -180,9 +180,9 @@ async function main() {
     logOk("Pruebas en verde");
   }
 
-  logStep("Preparando staging...");
+  logStep("Preparando staging (junto al destino, para evitar EXDEV)...");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const staging = join(runtimeRoot, `staging-${stamp}`);
+  const staging = join(dirname(opts.pluginDir), `.openviking-memory-staging-${stamp}`);
   await mkdir(staging, { recursive: true, mode: 0o755 });
 
   for (const item of itemsToCopy) {
@@ -211,14 +211,41 @@ async function main() {
     await chmod(join(staging, f), 0o755).catch(() => {});
   }
 
-  logStep("Instalando (rename atómico, sin borrados)...");
-  await mkdir(dirname(opts.pluginDir), { recursive: true });
-  if (await exists(opts.pluginDir)) {
-    const backupDir = join(backupsRoot, `openviking-memory-${stamp}`);
-    await rename(opts.pluginDir, backupDir);
-    logOk(`Instalación anterior movida a ${backupDir}`);
+  // Validación previa al reemplazo: el staging debe ser un plugin usable.
+  logStep("Validando staging...");
+  for (const name of ["hooks.json", "mcp_config.json"]) {
+    const parsed = JSON.parse(await readFile(join(staging, name), "utf-8"));
+    if (JSON.stringify(parsed).includes("{{")) {
+      throw new Error(`${name} quedó con placeholders sin resolver`);
+    }
   }
-  await rename(staging, opts.pluginDir);
+  for (const f of ["scripts/antigravity-hook.mjs", "servers/mcp-proxy.mjs", "plugin.json"]) {
+    if (!(await exists(join(staging, f)))) throw new Error(`staging incompleto: falta ${f}`);
+  }
+  logOk("staging válido (JSON parseable, sin placeholders, scripts presentes)");
+
+  logStep("Instalando (rename con rollback)...");
+  await mkdir(dirname(opts.pluginDir), { recursive: true });
+  let backupDir = null;
+  try {
+    if (await exists(opts.pluginDir)) {
+      backupDir = join(backupsRoot, `openviking-memory-${stamp}`);
+      await rename(opts.pluginDir, backupDir);
+      logOk(`Instalación anterior movida a ${backupDir}`);
+    }
+    await rename(staging, opts.pluginDir);
+  } catch (err) {
+    if (backupDir && !(await exists(opts.pluginDir))) {
+      await rename(backupDir, opts.pluginDir).catch(() => {});
+      logWarn("Rollback aplicado: se restauró la instalación anterior");
+    }
+    if (await exists(staging)) {
+      const failed = `${staging}.failed-${stamp}`;
+      await rename(staging, failed).catch(() => {});
+      logWarn(`Staging conservado para inspección: ${failed}`);
+    }
+    throw err;
+  }
   logOk(`Plugin instalado en ${opts.pluginDir}`);
 
   console.log(`

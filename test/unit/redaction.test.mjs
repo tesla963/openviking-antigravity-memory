@@ -80,3 +80,27 @@ describe("redaction: texto capturado", () => {
     assert.equal(redactSecrets(once), once);
   });
 });
+
+// Regresiones que salieron de la revisión de pares: la regla de Bearer censuraba
+// prosa en inglés y las contraseñas cortas se escapaban.
+describe("redaction: falsos positivos y huecos", () => {
+  it("no censura prosa con la palabra Bearer", () => {
+    for (const text of [
+      "The Bearer authentication protocol is described in RFC 6750",
+      "Bearer authorization header must be present",
+    ]) {
+      assert.equal(sanitizeCapturedText(text), text);
+    }
+  });
+
+  it("sí censura un token Bearer real", () => {
+    const out = sanitizeCapturedText("Authorization: Bearer abc123def456ghi789jkl0");
+    assert.ok(!out.includes("abc123def456ghi789jkl0"));
+    assert.ok(out.includes("[REDACTED_BEARER]"));
+  });
+
+  it("censura contraseñas cortas (>=6)", () => {
+    const out = sanitizeCapturedText("password: admin1");
+    assert.ok(!out.includes("admin1"), "una clave de 7 caracteres debe redactarse");
+  });
+});

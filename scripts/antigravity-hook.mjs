@@ -362,8 +362,11 @@ export async function handleStopWorker(payload, cfg, creds, log) {
 export async function main() {
   const action = (process.argv[2] || "").toLowerCase().trim();
   const cfg = loadConfig();
-  const creds = resolveOpenVikingCredentials();
-  const logger = createLogger("antigravity-hook", cfg);
+  const creds = resolveOpenVikingCredentials({
+    ...process.env,
+    OPENVIKING_CLI_CONFIG_FILE: cfg.cliConfigFile,
+  });
+  const logger = createLogger("antigravity-hook", { ...cfg, apiKey: creds.apiKey });
   const log = (cat, data) => {
     try { logger.log(cat, data); } catch {}
   };

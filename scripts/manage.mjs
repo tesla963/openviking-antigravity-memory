@@ -150,7 +150,10 @@ async function cmdReplay(cfg, creds) {
 async function main() {
   const cmd = (process.argv[2] || "status").toLowerCase();
   const cfg = loadConfig();
-  const creds = resolveOpenVikingCredentials();
+  const creds = resolveOpenVikingCredentials({
+    ...process.env,
+    OPENVIKING_CLI_CONFIG_FILE: cfg.cliConfigFile,
+  });
 
   switch (cmd) {
     case "status":

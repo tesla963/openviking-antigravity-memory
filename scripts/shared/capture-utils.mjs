@@ -108,10 +108,8 @@ function stripInjectedDigestBlocks(text) {
 
 export const SECRET_PATTERNS = [
   // Claves privadas PEM completas
-  [
-    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-    "[REDACTED_PRIVATE_KEY]",
-  ],
+  [/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    "[REDACTED_PRIVATE_KEY]"],
   // JWT
   [/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g, "[REDACTED_JWT]"],
   // OpenAI / Anthropic / OpenRouter / DeepSeek
@@ -128,10 +126,10 @@ export const SECRET_PATTERNS = [
   // Slack
   [/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "[REDACTED_SLACK_TOKEN]"],
   // Authorization: Bearer <token>
-  [/\b(Bearer\s+)[A-Za-z0-9\-._~+/]{12,}=*/gi, "$1[REDACTED_BEARER]"],
+  [/\b(Bearer\s+)(?=[A-Za-z0-9\-._~+/]{12,})(?:[A-Za-z0-9\-._~+/]*(?:\d)[A-Za-z0-9\-._~+/]*|[A-Za-z0-9\-._~+/]{32,})=*/gi, "$1[REDACTED_BEARER]"],
   // asignaciones api_key = "...", token: "...", password=...
   [
-    /\b(api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|pwd)\b(\s*[:=]\s*)(["']?)([^\s"',;]{8,})\3/gi,
+    /\b(api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|pwd)\b(\s*[:=]\s*)(["']?)([^\s"',;]{6,})\3/gi,
     "$1$2$3[REDACTED]$3",
   ],
   // líneas estilo .env con nombre sensible

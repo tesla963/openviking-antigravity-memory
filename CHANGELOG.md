@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-09-27 — correcciones de la revisión de pares
+
+Revisión hecha por Antigravity (Herdr, pane t19) sobre 544b841. Veredicto:
+"aprobado con observaciones menores". Los 4 defectos que señaló eran reales y
+están corregidos:
+
+- **Credenciales**: el hook y `manage` llamaban a `resolveOpenVikingCredentials()`
+  sin argumentos, así que leían `~/.openviking/ovcli.conf` mientras el instalador
+  escribe en `~/.openviking/antigravity/ovcli.conf`. En `auth_mode: dev`
+  funcionaba de casualidad; con API key habría dado 401. Ahora se pasa
+  `OPENVIKING_CLI_CONFIG_FILE: cfg.cliConfigFile`.
+- **Scrub de la API key en logs**: el logger recibía `cfg`, que no expone
+  `apiKey`, así que el reemplazo literal nunca corría. Ahora recibe
+  `{ ...cfg, apiKey: creds.apiKey }`.
+- **`uninstall.sh --purge`**: `mkdir -p "$BACKUP_DIR"` estaba dentro del `if` del
+  plugin, así que con el plugin ya ausente la purga fallaba en silencio. Movido
+  antes del condicional.
+- **Atomicidad del instalador**: el staging se creaba en `~/.openviking/...` y el
+  destino en `~/.gemini/...` (riesgo EXDEV); y dos `rename` sin rollback podían
+  dejar el plugin inexistente. Ahora el staging vive junto al destino, hay
+  validación previa (JSON parseable, sin `{{` pendientes, scripts presentes) y
+  rollback del backup si falla el segundo rename.
+- **Redacción, falsos positivos**: la regla de Bearer censuraba prosa
+  ("The Bearer authentication protocol"). Ahora exige token real (dígito o 32+
+  caracteres). Y las contraseñas de 6-7 caracteres ya se redactan.
+
+Pruebas: 33/33 (seis nuevas para estos casos).
+
 ## [0.2.0] - 2026-09-27 — fork macOS (tesla963)
 
 Basado en 0.1.0 de Vladimir Rogozhin (MIT).
